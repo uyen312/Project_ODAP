@@ -1,0 +1,55 @@
+### Trước khi chạy, nếu chưa có
+pip install playwright
+
+=======================================================================================================
+############ Terminal 1: START KAFKA
+#### Chạy kafka theo tùy theo máy
+cd kafka
+bin/kafka-storage.sh random-uuid
+
+bin/kafka-storage.sh format --cluster-id <uuid> --config config/server.properties --standalone
+
+bin/kafka-server-start.sh config/server.properties
+
+=======================================================================================================
+########## Terminal 2: 
+########### START HADOOP
+start-dfs.sh
+
+# Tạo folder lưu data
+hdfs dfs -mkdir -p /credit_card_transactions/data
+hdfs dfs -mkdir -p /credit_card_transactions/checkpoint
+
+# Check
+hdfs dfs -ls /credit_card_transactions
+
+---------------------------------------------------------------------------
+############# CREATE TOPIC
+cd kafka
+./bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic credit_card_transactions --partitions 1 --replication-factor 1
+
+# Check
+./bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+--------------------------------------------------------------------------
+################ SPARK STREAMING
+# Vào đường dẫn chứa file code
+cd ~
+cd Project_ODAP
+
+# Thay đổi theo version của spark
+spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1 spark_streaming.py
+
+==========================================================================================================
+######## Terminal 3: PRODUCER
+cd Project_ODAP
+python producer.py
+
+==========================================================================================================
+- KẾT THÚC: Terminal 2: stop-dfs.sh
+
+-----------------------------------------------
+xóa file Hadoop trước mỗi lần chạy lại
+hdfs dfs -rm -r /credit_card_transactions/data
+hdfs dfs -rm -r /credit_card_transactions/checkpoint
+

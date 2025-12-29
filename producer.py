@@ -14,7 +14,8 @@ CSV_FILE = "User0_credit_card_transactions.csv"
 # KHỞI TẠO PRODUCER
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BOOTSTRAP_SERVER,
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    retries=3
 )
 
 
@@ -53,7 +54,6 @@ for _, row in df.iterrows():
     producer.send(TOPIC_NAME, value=transaction)
     print("Sent transaction:", transaction)
 
-    # Giả lập giao dịch phát sinh ngẫu nhiên (1–5 giây)
     time.sleep(random.randint(1, 5))
 
 

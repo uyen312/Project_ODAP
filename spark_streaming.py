@@ -3,6 +3,14 @@ from pyspark.sql.functions import col, from_json, expr, lit
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
 from exchange_rate import get_vnd_rate
 
+# CONFIG
+KAFKA_BOOTSTRAP_SERVER = "localhost:9092"
+TOPIC_NAME = "credit_card_transactions"
+
+HDFS_BASE = "hdfs://localhost:9000/credit_card_transactions/"
+OUTPUT_PATH = HDFS_BASE + "data/"
+CHECKPOINT_PATH = HDFS_BASE + "checkpoint/"
+
 # SPARK SESSION
 spark = SparkSession.builder \
     .appName("CreditCardStreamingWithExchangeBackup") \
@@ -64,7 +72,7 @@ valid_df = valid_df.withColumn(
 
 # TÍNH AMOUNT_VND
 vnd_rate = get_vnd_rate()
-print(f"Current USD->VND rate: {vnd_rate}")
+# print(f"Current USD->VND rate: {vnd_rate}")
 
 valid_df = valid_df.withColumn("amount_vnd", col("amount") * lit(vnd_rate))
 
@@ -76,4 +84,14 @@ query = valid_df.writeStream \
     .option("truncate", False) \
     .start()
 
+
+# OUTPUT STREAM (HDFS PARQUET)
+parquet_query = valid_df.writeStream \
+    .format("parquet") \
+    .outputMode("append") \
+    .option("path", OUTPUT_PATH) \
+    .option("checkpointLocation", CHECKPOINT_PATH) \
+    .start()
+
 query.awaitTermination()
+parquet_query.awaitTermination()

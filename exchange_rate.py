@@ -23,10 +23,7 @@ async def crawl_vcb_exchange():
             return rate
     return 24000.0  # fallback nếu không tìm thấy USD
 
-
-# =========================
-# 3. FUNCTION LẤY TỶ GIÁ VNĐ
-# =========================
+# FUNCTION LẤY TỶ GIÁ VNĐ
 def get_vnd_rate():
     """
     Lấy tỷ giá USD->VND từ API, nếu lỗi dùng Web Scraping Vietcombank
