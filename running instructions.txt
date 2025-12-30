@@ -3,12 +3,16 @@ pip install playwright
 
 =======================================================================================================
 ############ Terminal 1: START KAFKA
-#### Chạy kafka theo tùy theo máy
+#### Chạy kafka theo tùy theo máy, chỉ tạo cluster id một lần duy nhất, nếu chạy lại cluster bị mất, thì phải đổi đường dẫn log trong "nano ~/kafka/config/server.properties", không để trong tmp
+
 cd kafka
 bin/kafka-storage.sh random-uuid
 
-bin/kafka-storage.sh format --cluster-id <uuid> --config config/server.properties --standalone
+Ex: NtwacHh2S6ubZZ2GGsnJKA
 
+bin/kafka-storage.sh format --cluster-id NtwacHh2S6ubZZ2GGsnJKA --config config/server.properties --standalone
+
+# chạy lại sau mỗi lần chạy
 bin/kafka-server-start.sh config/server.properties
 
 =======================================================================================================
@@ -16,15 +20,18 @@ bin/kafka-server-start.sh config/server.properties
 ########### START HADOOP
 start-dfs.sh
 
-# Tạo folder lưu data
+# Tạo folder lưu data, chỉ tạo 1 lần
 hdfs dfs -mkdir -p /credit_card_transactions/data
 hdfs dfs -mkdir -p /credit_card_transactions/checkpoint
+hdfs dfs -mkdir -p /credit_card_transactions/fraud
+hdfs dfs -mkdir -p /credit_card_transactions/checkpoint_fraud
 
 # Check
 hdfs dfs -ls /credit_card_transactions
 
 ---------------------------------------------------------------------------
 ############# CREATE TOPIC
+########### Kiểm tra nếu kh còn topic thì tạo lại
 cd kafka
 ./bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic credit_card_transactions --partitions 1 --replication-factor 1
 
@@ -47,9 +54,3 @@ python producer.py
 
 ==========================================================================================================
 - KẾT THÚC: Terminal 2: stop-dfs.sh
-
------------------------------------------------
-xóa file Hadoop trước mỗi lần chạy lại
-hdfs dfs -rm -r /credit_card_transactions/data
-hdfs dfs -rm -r /credit_card_transactions/checkpoint
-

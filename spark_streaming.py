@@ -8,8 +8,10 @@ KAFKA_BOOTSTRAP_SERVER = "localhost:9092"
 TOPIC_NAME = "credit_card_transactions"
 
 HDFS_BASE = "hdfs://localhost:9000/credit_card_transactions/"
-OUTPUT_PATH = HDFS_BASE + "data/"
-CHECKPOINT_PATH = HDFS_BASE + "checkpoint/"
+OUTPUT_CLEAN = HDFS_BASE + "data/"
+OUTPUT_FRAUD = HDFS_BASE + "fraud/"
+CHECKPOINT_CLEAN = HDFS_BASE + "checkpoint/"
+CHECKPOINT_FRAUD = HDFS_BASE + "checkpoint_fraud/"
 
 # SPARK SESSION
 spark = SparkSession.builder \
@@ -57,6 +59,8 @@ parsed_df = kafka_df.select(
 # LỌC GIAO DỊCH HỢP LỆ
 valid_df = parsed_df.filter(col("is_fraud") == "No")
 
+fraud_df = parsed_df.filter(col("is_fraud") == "Yes")
+
 
 # CHUẨN HÓA DATETIME
 valid_df = valid_df.withColumn(
@@ -89,9 +93,15 @@ query = valid_df.writeStream \
 parquet_query = valid_df.writeStream \
     .format("parquet") \
     .outputMode("append") \
-    .option("path", OUTPUT_PATH) \
-    .option("checkpointLocation", CHECKPOINT_PATH) \
+    .option("path", OUTPUT_CLEAN) \
+    .option("checkpointLocation", CHECKPOINT_CLEAN) \
     .start()
 
-query.awaitTermination()
-parquet_query.awaitTermination()
+parquet_fraud_query = fraud_df.writeStream \
+    .format("parquet") \
+    .outputMode("append") \
+    .option("path", OUTPUT_FRAUD) \
+    .option("checkpointLocation", CHECKPOINT_FRAUD) \
+    .start()
+
+spark.streams.awaitAnyTermination()
