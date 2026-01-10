@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, expr, lit
+from pyspark.sql.functions import col, from_json, expr, lit, concat
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
 from exchange_rate import get_vnd_rate
 
@@ -64,14 +64,15 @@ fraud_df = parsed_df.filter(col("is_fraud") == "Yes")
 
 # CHUẨN HÓA DATETIME
 valid_df = valid_df.withColumn(
-    "transaction_datetime",
+    "transaction_date",
     expr("""
         try_to_timestamp(
-            concat_ws(' ', concat_ws('-', year, month, day), concat(time, ':00')),
-            'yyyy-M-d HH:mm:ss'
+            concat_ws('/', day, month, year),
+            'dd/MM/yyyy'
         )
     """)
 )
+valid_df = valid_df.withColumn("time", expr("concat(time, ':00')"))
 
 
 # TÍNH AMOUNT_VND
