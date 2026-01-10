@@ -8,9 +8,9 @@ pip install playwright
 cd kafka
 bin/kafka-storage.sh random-uuid
 
-Ex: NtwacHh2S6ubZZ2GGsnJKA
+Ex: 57jtE2Z1TzWvo8A1Uv8aYQ
 
-bin/kafka-storage.sh format --cluster-id NtwacHh2S6ubZZ2GGsnJKA --config config/server.properties --standalone
+bin/kafka-storage.sh format --cluster-id 57jtE2Z1TzWvo8A1Uv8aYQ --configjp config/server.properties --standalone
 
 # chạy lại sau mỗi lần chạy
 bin/kafka-server-start.sh config/server.properties
@@ -54,3 +54,20 @@ python producer.py
 
 ==========================================================================================================
 - KẾT THÚC: Terminal 2: stop-dfs.sh
+
+
+=================================================
+############ AIRFLOW
+conda activate airflow-env
+airflow scheduler
+airflow webserver
+
+
+rm -rf ~/kafka-logs
+
+hdfs dfs -rm -r -f /credit_card_transactions/data \
+                 /credit_card_transactions/checkpoint \
+                 /credit_card_transactions/fraud \
+                 /credit_card_transactions/checkpoint_fraud
+
+airflow dags unpause credit_card_pipeline_daily
