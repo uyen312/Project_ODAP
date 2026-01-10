@@ -6,25 +6,25 @@ from pyspark.sql.types import DoubleType
 import pandas as pd
 import numpy as np
 
-# CONFIG
+# Cấu hình
 INPUT_NO_FRAUD = "hdfs://localhost:9000/credit_card_transactions/data/"
 INPUT_FRAUD = "hdfs://localhost:9000/credit_card_transactions/fraud/"
 # WAREHOUSE_PATH = "hdfs://localhost:9000/user/hive/warehouse"
 OUTPUT_PATH = "hdfs://localhost:9000/credit_card_transactions/analytics/"
 DATABASE_NAME = "credit_card_analytics"
 
-# PARAMETER PARSING
+# Parse tham số dòng lệnh
 parser = argparse.ArgumentParser()
 parser.add_argument("--date", required=True, help="YYYY-MM-DD")
 args = parser.parse_args()
 
-# TIME RANGE
+# Khoảng thời gian
 process_date_str = args.date
 # theo hướng thống kê tích lũy  
 process_date_start = datetime.strptime("2002-09-01", "%Y-%m-%d")
 # theo hướng thông kê theo ngày mới nhất
 # process_date_start = datetime.strptime(process_date_str + " 00:00:00", "%Y-%m-%d %H:%M:%S")
-process_date_end = datetime.strptime(process_date_str + " 23:59:59", "%Y-%m-%d %H:%M:%S")
+process_date_end = datetime.strptime(process_date_str, "%Y-%m-%d")
 print(f"Khoảng thời gian: {process_date_start} đến {process_date_end}")
 
 # SPARK SESSION
@@ -41,284 +41,263 @@ spark.sparkContext.setLogLevel("WARN")
 
 spark.sql(f"CREATE DATABASE IF NOT EXISTS {DATABASE_NAME}")
 
-# LOAD & FILTER DATA BY TIME RANGE
+# Tải và lọc dữ liệu theo ngày
 df_no_fraud = spark.read.parquet(INPUT_NO_FRAUD)
 df_no_fraud_filtered = df_no_fraud.filter(
-    (col("transaction_datetime") >= process_date_start) & 
-    (col("transaction_datetime") <= process_date_end)
+    (col("transaction_date") >= process_date_start) & 
+    (col("transaction_date") <= process_date_end)
 )
-
-df_fraud = spark.read.parquet(INPUT_FRAUD)
-# tạo cột mới là transaction_datetime từ year, month, day, time (time có dạng hh:mm)
-df_fraud = df_fraud.withColumn(
-    "transaction_datetime",
-    expr("""
-        try_to_timestamp(
-            concat_ws(' ', concat_ws('-', year, month, day), concat(time, ':00')),
-            'yyyy-M-d HH:mm:ss'
-        )
-    """)
-)
-df_fraud = df_fraud.withColumn(
-    "amount_vnd",
-    lit(None).cast(DoubleType())
-)
-df_fraud_filtered = df_fraud.filter(
-    (col("transaction_datetime") >= process_date_start) & 
-    (col("transaction_datetime") <= process_date_end)
-)
-
-# COMBINE 2 DATAFRAMES
-df_combined = df_no_fraud_filtered.unionByName(df_fraud_filtered)
-
-if df_combined.rdd.isEmpty():
+# Nếu không có dữ liệu mới, dừng job
+if df_no_fraud.rdd.isEmpty():
     print(f"No data for date {process_date_str}, stopping job.")
     spark.stop()
     exit(0)
+
+df_fraud = spark.read.parquet(INPUT_FRAUD)
+df_fraud = df_fraud.withColumn(
+    "transaction_date",
+    expr("""
+        try_to_timestamp(
+            concat_ws('/', day, month, year),
+            'dd/MM/yyyy'
+        )
+    """)
+)
+df_fraud_filtered = df_fraud.filter(
+    (col("transaction_date") >= process_date_start) & 
+    (col("transaction_date") <= process_date_end)
+)
+
+# Chuyển thành dataframe pandas
+pdf_no_fraud = df_no_fraud_filtered.toPandas()
+pdf_fraud = df_fraud_filtered.toPandas() 
+
+# |user|card|year|month|day|time |amount|use_chip|merchant_name|merchant_city|merchant_state|zip|mcc |errors|is_fraud|transaction_date|amount_vnd|
+# Thống kê và phân tích
+def analyze_by_user(pdf_no_fraud: pd.DataFrame, pdf_fraud: pd.DataFrame) -> pd.DataFrame:
+    """
+    Phân tích theo user
+    """
     
-# CONVERT TO PANDAS FOR ANALYSIS
-pdf_combined = df_combined.toPandas()
-# |user|card|year|month|day|time |amount|use_chip|merchant_name|merchant_city|merchant_state|zip|mcc |errors|is_fraud|transaction_datetime|amount_vnd|
+    # Thresholds
+    COUNT_THRESHOLD_7D_TRANSACTIONS = 5 # Ngưỡng: Có 5 giao dịch trong cửa sổ
+    ROLLING_WINDOW_7D = '7D' # Cửa sổ trượt: 7 ngày gần nhất
+    
+    # 1. Chuẩn bị cho Rolling Window (chỉ áp dụng cho NO-FRAUD)
+    pdf_no_fraud_sorted = pdf_no_fraud.sort_values(by=['user', 'transaction_date']).copy()
+    pdf_indexed = pdf_no_fraud_sorted.set_index('transaction_date') 
+    
+    # 2. Đếm tổng số giao dịch trong 7 NGÀY
+    pdf_no_fraud_sorted['transactions_in_7d'] = pdf_indexed \
+        .groupby('user')['amount_vnd'] \
+        .rolling(ROLLING_WINDOW_7D) \
+        .count() \
+        .reset_index(level=0, drop=True)
+    
+    # 3. Tổng hợp dữ liệu NO-FRAUD theo user
+    result_no_fraud = pdf_no_fraud_sorted.groupby('user').agg(
+        # Đếm tổng số lỗi
+        error_count=('errors', lambda x: x.notna().sum()), 
+        # Lấy giá trị max rolling count trong 7 ngày
+        current_transactions_7d=('transactions_in_7d', 'max') 
+    ).reset_index()
+    
+    # Đếm số lượng giao dịch fraud (size) cho mỗi user
+    result_fraud = pdf_fraud.groupby('user').agg(
+        fraud_count=('amount_vnd', 'size')
+    ).reset_index()
+    
+    # 4. Gộp Dữ liệu & chuẩn hóa
+    final_df = result_no_fraud.merge(
+        result_fraud, 
+        on='user', 
+        how='outer'
+    )
+    final_df['error_count'] = final_df['error_count'].fillna(0)
+    final_df['fraud_count'] = final_df['fraud_count'].fillna(0)
+    final_df['current_transactions_7d'] = final_df['current_transactions_7d'].fillna(0)
+    
+    # 6. Tạo cột Phân loại Khối lượng cao (high volume)
+    # Cột này chỉ cần kiểm tra sau khi điền 0, vì người chỉ có fraud sẽ có current_transactions_7d = 0
+    final_df['is_high_volume_7d'] = (
+        final_df['current_transactions_7d'] >= COUNT_THRESHOLD_7D_TRANSACTIONS
+    )
+    
+    # 7. Tính TRUNG BÌNH TOÀN BỘ (trên tất cả người dùng sau khi điền 0)
+    # Đây chính là cách tính: Tổng Lỗi / Tổng Người Dùng
+    avg_error_system = final_df['error_count'].mean()
+    avg_fraud_system = final_df['fraud_count'].mean() 
+    
+    # 8. Phân loại Vượt quá Trung bình
+    final_df['error_beyond_avg'] = final_df['error_count'] > avg_error_system
+    final_df['fraud_beyond_avg'] = final_df['fraud_count'] > avg_fraud_system
+    
+    # 9. Chọn cột đầu ra
+    result_df = final_df[['user', 
+                          'current_transactions_7d', 'is_high_volume_7d', 
+                          'error_beyond_avg', 'fraud_beyond_avg']]
+    
+    return result_df
 
+df_user = analyze_by_user(pdf_no_fraud.copy(), pdf_fraud.copy())
 
-# ANALYTICS
-def analyze_by_hour(filter_threshold, pdf_combined: pd.DataFrame) -> pd.DataFrame:
+# Lọc ra các giao dịch thành công (không lỗi) để thực hiện tính toán cho báo cáo kinh doanh
+pdf_no_fraud = pdf_no_fraud[pdf_no_fraud['error'].isna()]
+
+def analyze_by_hour(filter_threshold, pdf_no_fraud: pd.DataFrame, pdf_fraud: pd: pd.DataFrame) -> pd.DataFrame:
     """
     Tối ưu phân tích theo giờ.
-    input: 
-        threshold: ngưỡng lọc giá trị lớn
-
-    output: 
-        dataframe (hour, transaction_count, fraud_rate, count_big_amount)
     """
-    # 1. Trích xuất giờ giao dịch
-    pdf_combined['hour'] = pdf_combined['transaction_datetime'].dt.hour
     
-    # 2. Định nghĩa Threshold cho giao dịch có giá trị lớn
+    # 1. Định nghĩa Threshold cho giao dịch có giá trị lớn
     # Nếu muốn dùng percentile của TOÀN BỘ dữ liệu:
-    # threshold = pdf_combined['amount'].quantile(<quantile>) 
+    # threshold = pdf_no_fraud['amount_vnd'].quantile(<quantile>) 
     
     # Nếu dùng giá trị cố định:
     filter_threshold=filter_threshold
 
-    # 3. Sử dụng groupby() và agg() để tính toán tất cả các chỉ số
-    result_df = pdf_combined.groupby('hour').agg(
+    # lọc ra các giao dịch thành công 
+
+    # 2. Tính các chỉ số
+    result_df = pdf_no_fraud.groupby('hour').agg(
         # Đếm tổng giao dịch
-        transaction_count=('amount', 'size'), 
-        
-        # Đếm số lần gian lận (is_fraud = Yes)
-        fraud_count=('is_fraud', lambda x: (x == 'Yes').sum()),
+        transaction_count=('amount_vnd', 'size'), 
         
         # Đếm số giao dịch lớn
-        count_big_amount=('amount', lambda x: (x > filter_threshold).sum())
+        count_big_amount=('amount_vnd', lambda x: (x > filter_threshold).sum())
     ).reset_index()
 
+    result_fraud_df = pdf_fraud.groupby('hour').agg(transaction_count=('amount_vnd', 'size')).reset_index()
+
     # 4. Tính toán Fraud Rate 
-    result_df['fraud_rate'] = (result_df['fraud_count'] / result_df['transaction_count']) * 100
+    result_df['fraud_rate'] = result_fraud_df['transaction_count'] / (result_df['transaction_count'] + result_fraud_df['transaction_count']) * 100
     
     result_df = result_df[["hour", "transaction_count", "fraud_rate", "count_big_amount"]]    
     return result_df
 
-df_hour = analyze_by_hour(2000, pdf_combined.copy())
+df_hour = analyze_by_hour(5000000, pdf_no_fraud.copy(), pdf_fraud.copy())
 
-def analyze_by_merchant(threshold, pdf_combined: pd.DataFrame) -> pd.DataFrame:
+def analyze_by_merchant(threshold, pdf_no_fraud: pd.DataFrame, pdf_fraud: pd.DataFrame) -> pd.DataFrame:
     """
     Tối ưu phân tích theo merchant.
-    input: 
-        threshold: ngưỡng lọc giá trị lớn
-
-    output: 
-        dataframe (merchant_name, transaction_count, sum_amount, fraud_rate, count_big_amount)
     """
     # 1. Định nghĩa Threshold cho giao dịch có giá trị lớn
     # Nếu muốn dùng percentile của TOÀN BỘ dữ liệu:
-    # threshold = pdf_combined['amount'].quantile(<quantile>) 
+    # threshold = pdf_no_fraud['amount_vnd'].quantile(<quantile>) 
     
     # Nếu dùng giá trị cố định:
     filter_threshold = threshold
 
     # 2.Tính toán tất cả các chỉ số
-    result_df = pdf_combined.groupby('merchant_name').agg(
+    result_df = pdf_no_fraud.groupby('merchant_name').agg(
         # Đếm số lượng giao dịch
-        transaction_count=('amount', 'size'), 
+        transaction_count=('amount_vnd', 'size'), 
 
         # Tính tổng giá trị giao dịch 
-        sum_amount=('amount', 'sum'),
-        
-        # Đếm số lần gian lận (is_fraud = Yes)
-        fraud_count=('is_fraud', lambda x: (x == 'Yes').sum()),
+        sum_amount=('amount_vnd', 'sum'),
         
         # Đếm số giao dịch lớn
-        count_big_amount=('amount', lambda x: (x > filter_threshold).sum())
+        count_big_amount=('amount_vnd', lambda x: (x > filter_threshold).sum())
     ).reset_index()
 
+    result_fraud_df = pdf_fraud.groupby('merchant_name').agg(transaction_count=('amount_vnd', 'size')).reset_index()
+
     # 3. Tính toán Fraud Rate 
-    result_df['fraud_rate'] = (result_df['fraud_count'] / result_df['transaction_count']) * 100
+    result_df['fraud_rate'] = result_fraud_df['transaction_count'] / (result_df['transaction_count'] + result_fraud_df['transaction_count']) * 100
     
     result_df = result_df[["merchant_name", "transaction_count", "sum_amount", "fraud_rate", "count_big_amount"]]    
     return result_df
 
-df_merchant = analyze_by_merchant(2000, pdf_combined.copy())
+df_merchant = analyze_by_merchant(5000000, pdf_no_fraud.copy(), pdf_fraud.copy())
 
-def analyze_by_city(threshold, pdf_combined: pd.DataFrame) -> pd.DataFrame:
+def analyze_by_city(threshold, pdf_no_fraud: pd.DataFrame, pdf_fraud: pd.DataFrame) -> pd.DataFrame:
     """
     Tối ưu phân tích theo city.
-    input: 
-        threshold: ngưỡng lọc giá trị lớn
-
-    output: 
-        dataframe (merchant_city, transaction_count, sum_amount, fraud_rate, count_big_amount)
     """
     # 1. Định nghĩa Threshold cho giao dịch có giá trị lớn
     # Nếu muốn dùng percentile của TOÀN BỘ dữ liệu:
-    # threshold = pdf_combined['amount'].quantile(<quantile>) 
+    # threshold = pdf_no_fraud['amount_vnd'].quantile(<quantile>) 
     
     # Nếu dùng giá trị cố định:
     filter_threshold = threshold
 
     # 2.Tính toán tất cả các chỉ số
-    result_df = pdf_combined.groupby('merchant_city').agg(
+    result_df = pdf_no_fraud.groupby('merchant_city').agg(
         # Đếm số lượng giao dịch
-        transaction_count=('amount', 'size'), 
+        transaction_count=('amount_vnd', 'size'), 
 
         # Tính tổng giá trị giao dịch 
-        sum_amount=('amount', 'sum'),
-        
-        # Đếm số lần gian lận (is_fraud = Yes)
-        fraud_count=('is_fraud', lambda x: (x == 'Yes').sum()),
+        sum_amount=('amount_vnd', 'sum'),
         
         # Đếm số giao dịch lớn
-        count_big_amount=('amount', lambda x: (x > filter_threshold).sum())
+        count_big_amount=('amount_vnd', lambda x: (x > filter_threshold).sum())
     ).reset_index()
 
+    result_fraud_df = pdf_fraud.groupby('merchant_city').agg(transaction_count=('amount_vnd', 'size')).reset_index()
+
     # 3. Tính toán Fraud Rate 
-    result_df['fraud_rate'] = (result_df['fraud_count'] / result_df['transaction_count']) * 100
+    result_df['fraud_rate'] = result_fraud_df['transaction_count'] / (result_df['transaction_count'] + result_fraud_df['transaction_count']) * 100
     
     result_df = result_df[["merchant_city", "transaction_count", "sum_amount", "fraud_rate", "count_big_amount"]]    
     return result_df
 
-df_city = analyze_by_city(5000000, pdf_combined.copy())
+df_city = analyze_by_city(5000000, pdf_no_fraud.copy(), pdf_fraud.copy())
 
-def analyze_by_state(threshold, pdf_combined: pd.DataFrame) -> pd.DataFrame:
+def analyze_by_state(threshold, pdf_no_fraud: pd.DataFrame, pdf_fraud: pd.DataFrame) -> pd.DataFrame:
     """
     Tối ưu phân tích theo state.
-    input: 
-        threshold: ngưỡng lọc giá trị lớn
-
-    output: 
-        dataframe (merchant_state, transaction_count, sum_amount, fraud_rate, count_big_amount)
     """
     # 1. Định nghĩa Threshold cho giao dịch có giá trị lớn
     # Nếu muốn dùng percentile của TOÀN BỘ dữ liệu:
-    # threshold = pdf_combined['amount'].quantile(<quantile>) 
+    # threshold = pdf_no_fraud['amount_vnd'].quantile(<quantile>) 
     
     # Nếu dùng giá trị cố định:
     filter_threshold = threshold
 
     # 2.Tính toán tất cả các chỉ số
-    result_df = pdf_combined.groupby('merchant_state').agg(
+    result_df = pdf_no_fraud.groupby('merchant_state').agg(
         # Đếm số lượng giao dịch
-        transaction_count=('amount', 'size'), 
+        transaction_count=('amount_vnd', 'size'), 
 
         # Tính tổng giá trị giao dịch 
-        sum_amount=('amount', 'sum'),
-        
-        # Đếm số lần gian lận (is_fraud = Yes)
-        fraud_count=('is_fraud', lambda x: (x == 'Yes').sum()),
+        sum_amount=('amount_vnd', 'sum'),
         
         # Đếm số giao dịch lớn
-        count_big_amount=('amount', lambda x: (x > filter_threshold).sum())
+        count_big_amount=('amount_vnd', lambda x: (x > filter_threshold).sum())
     ).reset_index()
 
+    result_fraud_df = pdf_fraud.groupby('merchant_city').agg(transaction_count=('amount_vnd', 'size')).reset_index()
+
     # 3. Tính toán Fraud Rate 
-    result_df['fraud_rate'] = (result_df['fraud_count'] / result_df['transaction_count']) * 100
+    result_df['fraud_rate'] = result_fraud_df['transaction_count'] / (result_df['transaction_count'] + result_fraud_df['transaction_count']) * 100
     
     result_df = result_df[["merchant_state", "transaction_count", "sum_amount", "fraud_rate", "count_big_amount"]]    
     return result_df
 
-df_state = analyze_by_state(2000, pdf_combined.copy())
+df_state = analyze_by_state(5000000, pdf_no_fraud.copy(), pdf_fraud.copy())
 
-def analyze_by_dayOfWeek(pdf_combined: pd.DataFrame) -> pd.DataFrame:
+def analyze_by_dayOfWeek(pdf_no_fraud: pd.DataFrame) -> pd.DataFrame:
     """
-    Tối ưu phân tích theo day of week.
-    input: 
-        threshold: ngưỡng lọc giá trị lớn
-
-    output: 
-        dataframe (day_of_week, transaction_count, sum_amount)
+    Tối ưu phân tích theo day of week
     """
     # 1. Trích xuất ngày trong tuần
-    pdf_combined['day_of_week'] = pdf_combined['transaction_datetime'].dt.day_name()
+    pdf_no_fraud['day_of_week'] = pdf_no_fraud['transaction_date'].dt.day_name()
 
     # 3.Tính toán tất cả các chỉ số
-    result_df = pdf_combined.groupby('day_of_week').agg(
+    result_df = pdf_no_fraud.groupby('day_of_week').agg(
         # Đếm số lượng giao dịch
-        transaction_count=('amount', 'size'), 
+        transaction_count=('amount_vnd', 'size'), 
 
         # Tính tổng giá trị giao dịch 
-        sum_amount=('amount', 'sum')
+        sum_amount=('amount_vnd', 'sum')
     ).reset_index()
     
     result_df = result_df[["day_of_week", "transaction_count", "sum_amount"]]    
     return result_df
 
-df_dayOfWeek = analyze_by_dayOfWeek(pdf_combined.copy())
+df_dayOfWeek = analyze_by_dayOfWeek(pdf_no_fraud.copy())
 
-def analyze_by_user(pdf_combined: pd.DataFrame) -> pd.DataFrame:
-    """
-    Phân tích theo User, sử dụng Cửa sổ Trượt 24 Giờ (1 Ngày) để phát hiện hành vi giao dịch nhanh.
-    """
-    
-    # Threshold
-    TIME_THRESHOLD_SECONDS = 180 # Giao dịch nhanh: cách nhau dưới 180 giây
-    COUNT_THRESHOLD_FAST_TRANSACTIONS = 5 # Nhiều: Có 5 giao dịch nhanh trong cửa sổ
-    ROLLING_WINDOW = '15Min' # Cửa sổ trượt: 24 giờ gần nhất
-    
-    # 1.Nhóm theo user và time để tính diff
-    pdf_combined = pdf_combined.sort_values(by=['user', 'transaction_datetime'])
-    pdf_combined['time_diff'] = pdf_combined.groupby('user')['transaction_datetime'].diff().dt.total_seconds().fillna(np.inf)
-    
-    # 2. Tạo cờ boolean cho từng giao dịch: True nếu time_diff < 60s
-    pdf_combined['is_fast'] = pdf_combined['time_diff'] < TIME_THRESHOLD_SECONDS
-    
-    # 3. Áp dụng Rolling Window: Đếm tổng số giao dịch 'is_fast' trong 24H tính tới giao dịch hiện tại
-    pdf_indexed = pdf_combined.set_index('transaction_datetime')
-    pdf_combined['fast_transactions'] = pdf_indexed \
-        .groupby('user')['is_fast'] \
-        .rolling(ROLLING_WINDOW) \
-        .sum() \
-        .reset_index(level=0, drop=True)
-    
-    # 4. Tổng hợp dữ liệu (Chỉ lấy giá trị Rolling Window ở giao dịch MỚI NHẤT của mỗi User)
-    result_df = pdf_combined.groupby('user').agg(
-        total_transactions=('amount', 'size'), 
-        error_count=('errors', lambda x: x.notna().sum()),
-        fraud_count=('is_fraud', lambda x: (x == 'Yes').sum()),
-        
-        # Lấy giá trị rolling count tại giao dịch cuối cùng của user đó
-        fast_transactions=('fast_transactions', 'last') 
-        
-    ).reset_index()
-    
-    # Số lượng giao dịch nhanh có lớn hơn Ngưỡng 5 (COUNT_THRESHOLD) trong 24H không?
-    result_df['is_suspiciously_fast'] = (
-        result_df['fast_transactions'] >= COUNT_THRESHOLD_FAST_TRANSACTIONS
-    )
 
-    # 5. Phân tích cuối
-    avg_error = result_df['error_count'].mean()
-    avg_fraud = result_df['fraud_count'].mean()
-    
-    result_df['error_beyond_avg'] = result_df['error_count'] > avg_error
-    result_df['fraud_beyond_avg'] = result_df['fraud_count'] > avg_fraud
-    
-    result_df = result_df[['user', 
-                           'fast_transactions', 'is_suspiciously_fast', 
-                           'error_beyond_avg', 'fraud_beyond_avg']]
-    
-    return result_df
-
-df_user = analyze_by_user(pdf_combined.copy())
 
 # # EXPORT CSV TO HADOOP
 # def save_pandas_to_hdfs(pdf: pd.DataFrame, file_name: str, spark: SparkSession, base_path: str):
@@ -387,6 +366,13 @@ save_pandas_to_table(df_merchant, "df_merchant", spark, DATABASE_NAME)
 save_pandas_to_table(df_city, "df_city", spark, DATABASE_NAME)
 save_pandas_to_table(df_state, "df_state", spark, DATABASE_NAME)
 save_pandas_to_table(df_dayOfWeek, "df_day_of_week", spark, DATABASE_NAME)
+
+# OPTIONAL: export to csv
+df_user.to_csv("user_aggreation.csv", index=False)
+df_hour.to_csv("hour_aggreation.csv", index=False)
+df_merchant.to_csv("merchant_aggreation.csv", index=False)
+df_city.to_csv("city_aggreation.csv", index=False)
+df_state.to_csv("state_aggreation.csv", index=False)
 
 views = {
     "df_user": "v_user",
