@@ -1,0 +1,13 @@
+# Python cache
+# Python cache
+__pycache__/
+
+# Spark warehouse
+spark-warehouse/
+
+# Hive/Java temp
+${system:java.io.tmpdir}/
+
+# Log và file offset
+derby.log
+producer.ofset.txt
